@@ -14,31 +14,7 @@ const outfit = Outfit({
 });
 
 export const metadata = {
-  title: {
-    default: 'SarthiPDF — Free Online PDF Tools',
-    template: '%s | SarthiPDF',
-  },
-  description:
-    'SarthiPDF is the ultimate free PDF toolkit — merge, split, compress, convert, edit, sign, watermark and more. 100% private, no file uploads, AI-powered tools.',
-  keywords: ['PDF tools', 'PDF merger', 'PDF compressor', 'PDF converter', 'PDF editor', 'free PDF', 'online PDF'],
-  authors: [{ name: 'SarthiPDF' }],
-  creator: 'SarthiPDF',
-  openGraph: {
-    type: 'website',
-    locale: 'en_US',
-    url: 'https://sarthipdf.com',
-    title: 'SarthiPDF — Free Online PDF Tools',
-    description: 'The ultimate free PDF toolkit. Merge, split, compress, convert, edit, sign, and more.',
-    siteName: 'SarthiPDF',
-  },
-  twitter: {
-    card: 'summary_large_image',
-    title: 'SarthiPDF — Free Online PDF Tools',
-    description: 'The ultimate free PDF toolkit. Merge, split, compress, convert, edit, sign, and more.',
-    creator: '@sarthipdf',
-  },
-  robots: { index: true, follow: true },
-  metadataBase: new URL('https://sarthipdf.com'),
+  viewport: 'width=device-width, initial-scale=1',
 };
 
 export default function RootLayout({ children }) {

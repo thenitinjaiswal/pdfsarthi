@@ -439,6 +439,32 @@ kbd {
 }
 
 /* ─── Responsive tweaks ───────────────────────────────────── */
+@media (max-width: 768px) {
+  .btn-primary,
+  .btn-secondary,
+  .btn-action {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .btn-action {
+    padding: 14px 20px;
+    font-size: 14px;
+  }
+
+  .sidebar-item {
+    padding: 10px 14px;
+  }
+
+  .badge-pro {
+    white-space: normal;
+  }
+
+  .dashboard-responsive-grid {
+    grid-template-columns: repeat(1, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 640px) {
-  .btn-action { padding: 14px 20px; font-size: 14px; }
+  .btn-action { padding: 12px 16px; font-size: 13px; }
 }

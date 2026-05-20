@@ -69,7 +69,7 @@ export default function DashboardPage() {
       </motion.div>
 
       {/* Stats row */}
-      <div className="grid grid-cols-3 gap-3 mb-8">
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 mb-8">
         {STATS_ITEMS.map((s, i) => (
           <motion.div
             key={s.label}
@@ -110,14 +110,14 @@ export default function DashboardPage() {
 
       {/* Search + Category tabs */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 mb-5">
-        <div className="relative">
+        <div className="relative w-full sm:w-auto">
           <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-dark-500" />
           <input
             type="text"
             placeholder="Search tools..."
             value={search}
             onChange={e => setSearch(e.target.value)}
-            className="input-dark pl-9 py-2 text-sm w-48"
+            className="input-dark pl-9 py-2 text-sm w-full sm:w-72"
           />
         </div>
         <div className="flex items-center gap-1.5 flex-wrap">
@@ -136,7 +136,7 @@ export default function DashboardPage() {
 
       {/* All Tools grid */}
       <h2 className="text-xs font-semibold uppercase tracking-widest text-dark-600 mb-3">All Tools</h2>
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-7 gap-3 mb-10">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-3 mb-10">
         {filtered.map((tool, i) => (
           <motion.div
             key={tool.path}
