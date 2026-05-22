@@ -206,13 +206,18 @@ export function EditorProvider({ children }) {
   };
 
   // Edit existing extracted text item
+  // `updates` may include `edited` explicitly (e.g. false when text unchanged).
+  // If not provided, default to true so existing call-sites that don't pass `edited` still work.
   const updateTextItem = (pageNum, textItemId, updates) => {
+    const editedValue = updates.hasOwnProperty('edited') ? updates.edited : true;
     const updated = pagesData.map(page => {
       if (page.pageNum === pageNum) {
         return {
           ...page,
-          originalTextItems: page.originalTextItems.map(item => 
-            item.id === textItemId ? { ...item, ...updates, edited: true } : item
+          originalTextItems: page.originalTextItems.map(item =>
+            item.id === textItemId
+              ? { ...item, ...updates, edited: editedValue }
+              : item
           )
         };
       }
@@ -235,7 +240,8 @@ export function EditorProvider({ children }) {
                 bgColor: update.bgColor,
                 color: item.edited ? item.color : update.color,
                 underline: item.edited ? item.underline : (update.underline || item.underline || false),
-                colorsDetected: true
+                colorsDetected: true,
+                confident: update.confident
               };
             }
             return item;

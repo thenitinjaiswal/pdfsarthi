@@ -30,134 +30,110 @@ function hexToRgbObj(hex) {
   };
 }
 
-// Helper to analyze background and text color of a specific bounding box on canvas
+// Full-histogram background/text color detector.
+// Scans EVERY pixel in the bounding box, builds a frequency histogram with 32-step
+// quantization, then picks:
+//   bgColor  = most frequent bin  (background wins by pixel count since text is ~30-40% of area)
+//   textColor = most contrasting bin among the top frequent candidates
+// This is immune to "adjacent element bleed" since it only reads pixels inside the box.
 function detectBgAndTextColor(ctx, canvasX, canvasY, canvasW, canvasH, maxW, maxH) {
   const startX = Math.max(0, Math.floor(canvasX));
   const startY = Math.max(0, Math.floor(canvasY));
   const w = Math.min(maxW - startX, Math.floor(canvasW));
   const h = Math.min(maxH - startY, Math.floor(canvasH));
 
-  if (w <= 0 || h <= 0) {
-    return { bgColor: '#ffffff', color: '#000000' };
-  }
+  if (w <= 0 || h <= 0) return { bgColor: '#ffffff', color: '#000000', confident: false };
 
   try {
     const imgData = ctx.getImageData(startX, startY, w, h);
     const data = imgData.data;
+    const STEP = 32; // 256 / 32 = 8 bins per channel → manageable histogram
+    const bins = {};
+    let totalPixels = 0;
 
-    // 1. Gather border pixels to detect background color
-    const borderColors = [];
-    for (let x = 0; x < w; x++) {
-      borderColors.push(getPixelColor(data, x, 0, w));
-      borderColors.push(getPixelColor(data, x, h - 1, w));
-    }
-    for (let y = 1; y < h - 1; y++) {
-      borderColors.push(getPixelColor(data, 0, y, w));
-      borderColors.push(getPixelColor(data, w - 1, y, w));
-    }
-
-    const bgRGB = findDominantColor(borderColors);
-    const bgColorHex = rgbToHex(bgRGB.r, bgRGB.g, bgRGB.b);
-
-    // 2. Gather non-background inside pixels to detect text color
-    const insideColors = [];
-    const stepY = Math.max(1, Math.floor(h / 15));
-    const stepX = Math.max(1, Math.floor(w / 15));
-    for (let y = 1; y < h - 1; y += stepY) {
-      for (let x = 1; x < w - 1; x += stepX) {
-        const c = getPixelColor(data, x, y, w);
-        const dist = Math.sqrt(
-          Math.pow(c.r - bgRGB.r, 2) +
-          Math.pow(c.g - bgRGB.g, 2) +
-          Math.pow(c.b - bgRGB.b, 2)
-        );
-        if (dist > 50) {
-          insideColors.push(c);
-        }
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const idx = (y * w + x) * 4;
+        if (data[idx + 3] < 128) continue; // skip transparent
+        const bR = Math.round(data[idx]     / STEP) * STEP;
+        const bG = Math.round(data[idx + 1] / STEP) * STEP;
+        const bB = Math.round(data[idx + 2] / STEP) * STEP;
+        const key = `${bR},${bG},${bB}`;
+        bins[key] = (bins[key] || 0) + 1;
+        totalPixels++;
       }
     }
 
-    let textColorHex = '#000000';
-    if (insideColors.length > 0) {
-      const textRGB = findDominantColor(insideColors);
-      textColorHex = rgbToHex(textRGB.r, textRGB.g, textRGB.b);
-    } else {
-      const luminance = (bgRGB.r * 0.299 + bgRGB.g * 0.587 + bgRGB.b * 0.114);
-      textColorHex = luminance < 128 ? '#ffffff' : '#000000';
+    if (totalPixels === 0) return { bgColor: '#ffffff', color: '#000000', confident: false };
+
+    // Sort by frequency (descending)
+    const sorted = Object.entries(bins)
+      .sort((a, b) => b[1] - a[1]);
+
+    // Most frequent color = background
+    const [bgKey, bgCount] = sorted[0];
+    const [bgR, bgG, bgB] = bgKey.split(',').map(Number);
+    const bgLum = bgR * 0.299 + bgG * 0.587 + bgB * 0.114;
+    const bgColorHex = rgbToHex(bgR, bgG, bgB);
+
+    // Background must be reasonably dominant (> 25% of all pixels)
+    // If not, this is a complex image region — fall back safely
+    if (bgCount / totalPixels < 0.25) {
+      return { bgColor: '#ffffff', color: '#000000', confident: false };
     }
 
-    // 3. Detect Underline by scanning the baseline row near the bottom
+    // Find the most contrasting frequent color = text color
+    // Check top 15 candidates; stop when count drops below 3% of total
+    let textColorHex = '#000000';
+    let bestContrast = 0;
+    const minCount = totalPixels * 0.03;
+
+    for (let i = 1; i < Math.min(sorted.length, 15); i++) {
+      const [key, count] = sorted[i];
+      if (count < minCount) break;
+      const [r, g, b] = key.split(',').map(Number);
+      const lum = r * 0.299 + g * 0.587 + b * 0.114;
+      const contrast = Math.abs(lum - bgLum);
+      if (contrast > bestContrast) {
+        bestContrast = contrast;
+        textColorHex = rgbToHex(r, g, b);
+      }
+    }
+
+    // Confidence: we need at least 40 luminance units of contrast
+    const confident = bestContrast >= 40;
+    if (!confident) {
+      // Fall back: infer text from bg luminance
+      textColorHex = bgLum < 128 ? '#ffffff' : '#000000';
+    }
+
+    // ── Underline detection: scan row near baseline ──
     let underline = false;
     if (w > 10 && h > 6) {
       const textRGB = hexToRgbObj(textColorHex);
       const bgRGBObj = hexToRgbObj(bgColorHex);
-      
       const targetY = Math.floor(h - Math.max(2, h * 0.12));
-      let matchCount = 0;
-      let sampleCount = 0;
-      
+      let matchCount = 0, sampleCount = 0;
       for (let x = 2; x < w - 2; x++) {
         const c = getPixelColor(data, x, targetY, w);
-        const distToText = Math.sqrt(
-          Math.pow(c.r - textRGB.r, 2) +
-          Math.pow(c.g - textRGB.g, 2) +
-          Math.pow(c.b - textRGB.b, 2)
-        );
-        const distToBg = Math.sqrt(
-          Math.pow(c.r - bgRGBObj.r, 2) +
-          Math.pow(c.g - bgRGBObj.g, 2) +
-          Math.pow(c.b - bgRGBObj.b, 2)
-        );
-        
+        const dText = Math.sqrt((c.r-textRGB.r)**2 + (c.g-textRGB.g)**2 + (c.b-textRGB.b)**2);
+        const dBg   = Math.sqrt((c.r-bgRGBObj.r)**2 + (c.g-bgRGBObj.g)**2 + (c.b-bgRGBObj.b)**2);
         sampleCount++;
-        if (distToText < 65 && distToBg > 40) {
-          matchCount++;
-        }
+        if (dText < 65 && dBg > 40) matchCount++;
       }
-      
-      if (sampleCount > 0 && (matchCount / sampleCount) > 0.40) {
-        underline = true;
-      }
+      underline = sampleCount > 0 && (matchCount / sampleCount) > 0.40;
     }
 
-    return { bgColor: bgColorHex, color: textColorHex, underline };
+    return { bgColor: bgColorHex, color: textColorHex, underline, confident };
   } catch (e) {
     console.error('Color detection failed:', e);
-    return { bgColor: '#ffffff', color: '#000000' };
+    return { bgColor: '#ffffff', color: '#000000', confident: false };
   }
 }
 
 function getPixelColor(data, x, y, width) {
   const idx = (y * width + x) * 4;
-  return {
-    r: data[idx],
-    g: data[idx + 1],
-    b: data[idx + 2],
-    a: data[idx + 3]
-  };
-}
-
-function findDominantColor(colors) {
-  if (colors.length === 0) return { r: 255, g: 255, b: 255 };
-  
-  const bins = {};
-  let maxCount = 0;
-  let dominant = colors[0];
-
-  for (const c of colors) {
-    const binR = Math.round(c.r / 16) * 16;
-    const binG = Math.round(c.g / 16) * 16;
-    const binB = Math.round(c.b / 16) * 16;
-    const key = `${binR},${binG},${binB}`;
-
-    bins[key] = (bins[key] || 0) + 1;
-    if (bins[key] > maxCount) {
-      maxCount = bins[key];
-      dominant = { r: binR, g: binG, b: binB };
-    }
-  }
-
-  return dominant;
+  return { r: data[idx], g: data[idx+1], b: data[idx+2], a: data[idx+3] };
 }
 
 function rgbToHex(r, g, b) {
@@ -165,6 +141,21 @@ function rgbToHex(r, g, b) {
     const hex = Math.min(255, Math.max(0, x)).toString(16);
     return hex.length === 1 ? '0' + hex : hex;
   }).join('');
+}
+
+// Validate detected colors: returns safe bgColor/textColor pair.
+// If detected bg and text don't have enough contrast, fall back to white/black.
+function validateColors(bgColor, textColor) {
+  const bg = hexToRgbObj(bgColor);
+  const tx = hexToRgbObj(textColor);
+  const bgLum = bg.r * 0.299 + bg.g * 0.587 + bg.b * 0.114;
+  const txLum = tx.r * 0.299 + tx.g * 0.587 + tx.b * 0.114;
+  const contrast = Math.abs(bgLum - txLum);
+  if (contrast < 40) {
+    // Low contrast — detection failed, return safe pair
+    return { bgColor: '#ffffff', color: '#000000', confident: false };
+  }
+  return { bgColor, color: textColor, confident: true };
 }
 
 export default function PDFPage({ pageNum, pdfjsDoc, onOCRRequest, onPageRendered }) {
@@ -250,7 +241,17 @@ export default function PDFPage({ pageNum, pdfjsDoc, onOCRRequest, onPageRendere
       const canvasHeight = item.height * zoom * dpiScale;
       
       const colors = detectBgAndTextColor(ctx, canvasX, canvasY, canvasWidth, canvasHeight, canvasW, canvasH);
-      colorUpdates[item.id] = colors;
+      
+      // Validate the raw detection
+      const validated = validateColors(colors.bgColor, colors.color);
+      
+      colorUpdates[item.id] = {
+        bgColor: validated.bgColor,
+        color: validated.color,
+        underline: colors.underline,
+        colorsDetected: true,
+        confident: validated.confident
+      };
     });
     
     updateTextItemsColors(pageNum, colorUpdates);
@@ -266,8 +267,8 @@ export default function PDFPage({ pageNum, pdfjsDoc, onOCRRequest, onPageRendere
 
       const rotation = pageData.rotation || 0;
       
-      // Calculate high-DPI scaling
-      const dpiScale = window.devicePixelRatio || 1;
+      // Calculate high-DPI scaling. Force a minimum of 2.5x for crisp "premium" text rendering.
+      const dpiScale = Math.max(window.devicePixelRatio || 1, 2.5);
       const viewport = page.getViewport({ scale: zoom, rotation });
       
       canvas.width = Math.floor(viewport.width * dpiScale);
@@ -576,15 +577,31 @@ export default function PDFPage({ pageNum, pdfjsDoc, onOCRRequest, onPageRendere
             className="absolute inset-0 pointer-events-none z-10"
             style={{ transform: `rotate(${pageData.rotation || 0}deg)`, transformOrigin: 'center' }}
           >
-            {pageData.originalTextItems.map((item) => {
+          {pageData.originalTextItems.map((item) => {
               const isSelected = selectedElement?.type === 'text-item' && selectedElement?.id === item.id;
               const isEditingTextMode = activeTool === 'edit-text';
+              const isHovered = isEditingTextMode; // All items get ready when in edit-text mode
               
               const left = item.left * zoom;
               const top = item.top * zoom;
               const width = item.width * zoom;
               const height = item.height * zoom;
               const fontSz = item.fontSize * zoom;
+
+              // Determine background:
+              // - Transparent when not in edit-text mode (PDF shows through cleanly)
+              // - Opaque detected bgColor when selected OR when edited (masks old canvas text)
+              // - Semi-transparent tint on hover within edit-text mode
+              const resolvedBg = item.bgColor || '#ffffff';
+              let overlayBg = 'transparent';
+              if (item.edited) {
+                overlayBg = resolvedBg; // fully opaque to hide original text
+              } else if (isSelected) {
+                overlayBg = resolvedBg; // opaque so old text is hidden while editing
+              } else if (isEditingTextMode) {
+                // Subtle tint so user knows it's clickable, but PDF still visible
+                overlayBg = 'transparent';
+              }
 
               return (
                 <div
@@ -595,7 +612,9 @@ export default function PDFPage({ pageNum, pdfjsDoc, onOCRRequest, onPageRendere
                     top: `${top}px`,
                     width: `${width + 4}px`,
                     height: `${height + 2}px`,
-                    backgroundColor: (item.edited || isSelected) ? (item.bgColor || '#ffffff') : 'transparent',
+                    backgroundColor: overlayBg,
+                    // Ensure the overlay is a proper stacking context so nothing bleeds through
+                    isolation: (isSelected || item.edited) ? 'isolate' : 'auto',
                   }}
                   className={`pointer-events-auto ${
                     isEditingTextMode 
@@ -616,7 +635,7 @@ export default function PDFPage({ pageNum, pdfjsDoc, onOCRRequest, onPageRendere
                     }}
                     onBlur={(e) => {
                       const newTxt = e.target.innerText;
-                      updateTextItem(pageNum, item.id, { newText: newTxt });
+                      updateTextItem(pageNum, item.id, { newText: newTxt, edited: newTxt !== item.originalText });
                     }}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && !e.shiftKey) {
@@ -629,15 +648,19 @@ export default function PDFPage({ pageNum, pdfjsDoc, onOCRRequest, onPageRendere
                       fontSize: `${fontSz}px`,
                       // Use exact CSS font from PDF.js when available, with a robust fallback to mapped standard fonts
                       fontFamily: item.cssFontFamilyRaw
-                        ? `"${item.cssFontFamilyRaw}", ${getCssFontFamily(item.fontFamily || fontFamily)}`
+                        ? `${item.cssFontFamilyRaw}, ${getCssFontFamily(item.fontFamily || fontFamily)}`
                         : getCssFontFamily(item.fontFamily || fontFamily),
-                      color: (item.edited || isSelected) ? (item.color || '#000000') : 'transparent',
-                      fontWeight: item.bold ? 'bold' : 'normal',
+                      // Use numeric fontWeightValue for precise semibold (600), black (900) rendering
+                      fontWeight: item.fontWeightValue || (item.bold ? 700 : 400),
                       fontStyle: item.italic ? 'italic' : 'normal',
                       textDecoration: item.underline ? 'underline' : 'none',
+                      color: (item.edited || isSelected) ? (item.color || '#000000') : 'transparent',
                       outline: 'none',
                       caretColor: item.color || '#000000',
                       textAlign: item.alignment || 'left',
+                      // Prevent sub-pixel bleed from canvas behind when selected
+                      WebkitFontSmoothing: 'antialiased',
+                      MozOsxFontSmoothing: 'grayscale',
                     }}
                     className={`absolute inset-0 whitespace-nowrap leading-none outline-none z-20 ${
                       isEditingTextMode ? 'pointer-events-auto' : 'pointer-events-none'

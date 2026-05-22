@@ -156,7 +156,7 @@ function groupTextItems(items, styles, viewport, commonObjs) {
       
       const scaleX = Math.sqrt(transform[0] * transform[0] + transform[1] * transform[1]);
       const scaleY = Math.sqrt(transform[2] * transform[2] + transform[3] * transform[3]);
-      const size = Math.round(Math.max(scaleX, scaleY));
+      const size = Math.max(scaleX, scaleY); // Keep precise decimal for pixel-perfect font size
       
       // Font detection from resources if available
       let fontObj = null;
@@ -173,46 +173,102 @@ function groupTextItems(items, styles, viewport, commonObjs) {
       }
       
       const postscriptName = fontObj ? (fontObj.name || fontObj.fallbackName || '') : '';
-      const isObjBold = fontObj ? !!fontObj.bold : false;
-      const isObjItalic = fontObj ? !!fontObj.italic : false;
+      
+      // Detailed font object inspection for bold/italic flags
+      let isObjBold = false;
+      let isObjItalic = false;
+      if (fontObj) {
+        if (fontObj.isBold || fontObj.bold) isObjBold = true;
+        if (fontObj.isItalic || fontObj.italic) isObjItalic = true;
+        
+        // Check standard PDF FontDescriptor flags (bit 6 = Italic, bit 19 = ForceBold)
+        if (fontObj.flags) {
+          if (fontObj.flags & 262144) isObjBold = true;
+          if (fontObj.flags & 64) isObjItalic = true;
+        }
+        
+        // Check cssFontInfo if available (newer PDF.js versions)
+        if (fontObj.cssFontInfo) {
+          if (fontObj.cssFontInfo.fontWeight >= 600 || fontObj.cssFontInfo.fontWeight === 'bold') isObjBold = true;
+          if (fontObj.cssFontInfo.fontStyle === 'italic' || fontObj.cssFontInfo.fontStyle === 'oblique') isObjItalic = true;
+        }
+      }
       
       const style = (styles && styles[fontName]) || {};
       const cssFontFamily = style.fontFamily || '';
+      const loadedName = fontObj ? (fontObj.loadedName || fontObj.name) : null;
+      
       const cssFontFamilyLower = cssFontFamily.toLowerCase();
       const fontNameLower = (fontName || '').toLowerCase();
       const resolvedFontName = (postscriptName || fontName || '').toLowerCase();
-      
-      const bold = isObjBold ||
-                   resolvedFontName.includes('bold') || 
-                   resolvedFontName.includes('bld') || 
-                   resolvedFontName.includes('heavy') || 
-                   resolvedFontName.includes('black') || 
-                   resolvedFontName.includes('medium') || 
-                   resolvedFontName.includes('semibold') || 
-                   resolvedFontName.includes('demi') || 
-                   resolvedFontName.includes('-bd') || 
-                   resolvedFontName.includes('_bd') || 
-                   resolvedFontName.includes('.bd') || 
-                   resolvedFontName.includes(',bold') ||
-                   cssFontFamilyLower.includes('bold') ||
-                   cssFontFamilyLower.includes('semibold') ||
-                   cssFontFamilyLower.includes('700') ||
-                   cssFontFamilyLower.includes('800') ||
-                   cssFontFamilyLower.includes('900');
-                   
-      const italic = isObjItalic ||
-                     resolvedFontName.includes('italic') || 
-                     resolvedFontName.includes('oblique') || 
-                     resolvedFontName.includes('slanted') || 
-                     resolvedFontName.includes('-it') || 
-                     resolvedFontName.includes('_it') || 
-                     resolvedFontName.includes('.it') || 
-                     resolvedFontName.includes('-obl') || 
-                     resolvedFontName.includes('_obl') || 
-                     resolvedFontName.includes('.obl') || 
-                     cssFontFamilyLower.includes('italic') || 
-                     cssFontFamilyLower.includes('oblique') ||
-                     cssFontFamilyLower.includes('slanted');
+
+      // ── PRIORITY 1: Read fontWeight and fontStyle directly from PDF.js style object ──
+      // style.fontWeight is a number (100-900) or string like 'bold'/'normal'
+      // style.fontStyle is 'normal', 'italic', or 'oblique'
+      const rawFontWeight = style.fontWeight; // number OR string
+      const rawFontStyle  = style.fontStyle;  // 'normal' | 'italic' | 'oblique'
+
+      // Convert raw fontWeight to a reliable number (0 if unavailable)
+      let numericWeight = 0;
+      if (rawFontWeight !== undefined && rawFontWeight !== null) {
+        const parsed = Number(rawFontWeight);
+        if (!isNaN(parsed)) {
+          numericWeight = parsed;
+        } else if (String(rawFontWeight).toLowerCase() === 'bold'   ) numericWeight = 700;
+        else if (String(rawFontWeight).toLowerCase() === 'bolder'  ) numericWeight = 800;
+        else if (String(rawFontWeight).toLowerCase() === 'normal'  ) numericWeight = 400;
+      }
+
+      const styleIsBold   = numericWeight >= 600;
+      const styleIsItalic = rawFontStyle === 'italic' || rawFontStyle === 'oblique';
+
+      // ── PRIORITY 2: PostScript / internal font name heuristics ──
+      const nameBold = resolvedFontName.includes('bold') ||
+                       resolvedFontName.includes('bld')  ||
+                       resolvedFontName.includes('heavy')||
+                       resolvedFontName.includes('black')||
+                       resolvedFontName.includes('semibold') ||
+                       resolvedFontName.includes('demibold') ||
+                       resolvedFontName.includes('demi') ||
+                       resolvedFontName.includes('-bd')  ||
+                       resolvedFontName.includes('_bd')  ||
+                       resolvedFontName.includes('.bd')  ||
+                       resolvedFontName.includes(',bold');
+
+      const nameItalic = resolvedFontName.includes('italic') ||
+                         resolvedFontName.includes('oblique') ||
+                         resolvedFontName.includes('slanted') ||
+                         resolvedFontName.includes('-it')  ||
+                         resolvedFontName.includes('_it')  ||
+                         resolvedFontName.includes('.it')  ||
+                         resolvedFontName.includes('-obl') ||
+                         resolvedFontName.includes('_obl') ||
+                         resolvedFontName.includes('.obl');
+
+      // ── PRIORITY 3: CSS fontFamily string fallback ──
+      const cssBold   = cssFontFamilyLower.includes('bold')    ||
+                        cssFontFamilyLower.includes('semibold') ||
+                        cssFontFamilyLower.includes('700')      ||
+                        cssFontFamilyLower.includes('800')      ||
+                        cssFontFamilyLower.includes('900');
+
+      const cssItalic = cssFontFamilyLower.includes('italic')  ||
+                        cssFontFamilyLower.includes('oblique') ||
+                        cssFontFamilyLower.includes('slanted');
+
+      // ── PRIORITY 4: Detect faux-italic (oblique) via transformation matrix skew ──
+      // In a 2D affine matrix [a, b, c, d, e, f], 'c' (transform[2]) is the horizontal skew.
+      // A significant skew angle indicates the PDF generator applied a fake italic slant.
+      const hasItalicSkew = Math.abs(transform[2]) > 0.1;
+
+      const bold   = isObjBold   || styleIsBold   || nameBold   || cssBold;
+      const italic = isObjItalic || styleIsItalic || nameItalic || cssItalic || hasItalicSkew;
+
+      // Store the precise numeric weight for CSS rendering accuracy (semibold=600, black=900 etc.)
+      // If numericWeight is known use it; else fall back to 700/400
+      const fontWeightValue = numericWeight > 0
+        ? numericWeight
+        : (bold ? 700 : 400);
       
       let family = 'Helvetica';
       const normalizedRaw = cssFontFamilyLower.trim();
@@ -262,6 +318,33 @@ function groupTextItems(items, styles, viewport, commonObjs) {
         alignment = 'right';
       }
       
+      // ─── DEBUG: Log raw font data for first 5 items ───
+      if (idx < 5) {
+        console.log(`🔍 TEXT ITEM #${idx}: "${str.substring(0, 30)}"`, {
+          fontName,
+          postscriptName,
+          loadedName,
+          cssFontFamily,
+          rawFontWeight,
+          rawFontStyle,
+          numericWeight,
+          isObjBold,
+          isObjItalic,
+          nameBold,
+          nameItalic,
+          bold,
+          italic,
+          fontWeightValue,
+          fontObjKeys: fontObj ? Object.keys(fontObj) : 'null',
+          fontObjBold: fontObj?.bold,
+          fontObjIsBold: fontObj?.isBold,
+          fontObjFlags: fontObj?.flags,
+          fontObjData: fontObj?.data ? 'has data' : 'no data',
+          styleKeys: Object.keys(style),
+          styleObj: JSON.parse(JSON.stringify(style)),
+        });
+      }
+
       return {
         id: `text-item-${idx}`,
         str,
@@ -281,9 +364,10 @@ function groupTextItems(items, styles, viewport, commonObjs) {
         color: '#000000',
         bold,
         italic,
-        // cssFontFamilyRaw: exact font family from PDF.js (e.g. "Times New Roman", "Calibri")
+        fontWeightValue,
+        // cssFontFamilyRaw: exact font family from PDF.js (e.g. "g_d0_f1")
         // Used for on-screen overlay to match the PDF exactly
-        cssFontFamilyRaw: cssFontFamily || null,
+        cssFontFamilyRaw: loadedName || cssFontFamily || null,
         // fontFamily: pdf-lib compatible bucket used only for export
         fontFamily: family,
         alignment,
@@ -350,13 +434,18 @@ function mergeGroup(group, pageWidth) {
   const mergedHeight = Math.max(...group.map(g => g.height));
   
   const totalLength = group.reduce((sum, g) => sum + g.str.length, 0) || 1;
-  const mergedFontSize = Math.round(group.reduce((sum, g) => sum + g.fontSize * g.str.length, 0) / totalLength) || first.fontSize;
+  const mergedFontSize = group.reduce((sum, g) => sum + g.fontSize * g.str.length, 0) / totalLength || first.fontSize;
   
-  const boldLength = group.filter(g => g.bold).reduce((sum, g) => sum + g.str.length, 0);
+  const boldLength   = group.filter(g => g.bold).reduce((sum, g) => sum + g.str.length, 0);
   const italicLength = group.filter(g => g.italic).reduce((sum, g) => sum + g.str.length, 0);
   
-  const mergedBold = boldLength > totalLength / 2;
+  const mergedBold   = boldLength   > totalLength / 2;
   const mergedItalic = italicLength > totalLength / 2;
+
+  // Weighted-average numeric font weight (preserves semibold/black etc.)
+  const mergedFontWeightValue = Math.round(
+    group.reduce((sum, g) => sum + (g.fontWeightValue || (g.bold ? 700 : 400)) * g.str.length, 0) / totalLength
+  );
   
   // Auto-detect alignment for merged group
   let alignment = 'left';
@@ -387,6 +476,7 @@ function mergeGroup(group, pageWidth) {
     color: '#000000',
     bold: mergedBold,
     italic: mergedItalic,
+    fontWeightValue: mergedFontWeightValue,
     cssFontFamilyRaw: first.cssFontFamilyRaw || null,
     fontFamily: first.fontFamily,
     alignment,
@@ -650,15 +740,18 @@ function EditorWorkspace() {
         CourierBoldOblique: await outDoc.embedFont(StandardFonts.CourierBoldOblique),
       };
 
-      const selectFont = (family, bold, italic) => {
+      // selectFont: pick the best available standard font variant.
+      // fontWeightValue: numeric CSS weight (100–900). >= 600 → use Bold variant.
+      const selectFont = (family, fontWeightValue, italic) => {
+        const isBold = (fontWeightValue || 400) >= 600;
         let fName = family || 'Helvetica';
         if (fName !== 'Helvetica' && fName !== 'TimesRoman' && fName !== 'Courier') {
-          fName = 'Helvetica'; // fallback
+          fName = 'Helvetica'; // fallback to standard
         }
         const suffix = fName === 'TimesRoman' ? 'Italic' : 'Oblique';
-        if (bold && italic) return fonts[`${fName}Bold${suffix}`] || fonts.HelveticaBoldOblique;
-        if (bold) return fonts[`${fName}Bold`] || fonts.HelveticaBold;
-        if (italic) return fonts[`${fName}${suffix}`] || fonts.HelveticaOblique;
+        if (isBold && italic) return fonts[`${fName}Bold${suffix}`] || fonts.HelveticaBoldOblique;
+        if (isBold)           return fonts[`${fName}Bold`] || fonts.HelveticaBold;
+        if (italic)           return fonts[`${fName}${suffix}`] || fonts.HelveticaOblique;
         return fonts[fName];
       };
 
@@ -681,33 +774,43 @@ function EditorWorkspace() {
         if (pageMeta.originalTextItems) {
           for (const item of pageMeta.originalTextItems) {
             if (item.edited) {
-              // Hide original characters: Draw mask over entire bounding box using detected background color
+              // Derive bold from numeric fontWeightValue (>= 600 = bold variant)
+              const itemIsBold = (item.fontWeightValue || 0) >= 600 || item.bold;
+
+              // ── Mask: paint background rectangle over original text ──
+              // Expand by extra padding to fully cover ascenders & descenders
               const [bgR, bgG, bgB] = hexToRgb(item.bgColor || '#ffffff');
               const maskColor = rgb(bgR, bgG, bgB);
+
+              // Extra vertical padding (20% of height) to cover ascenders above baseline
+              // and descenders below. Extra horizontal padding for anti-aliasing fringe.
+              const padX = 2;
+              const padYTop = Math.max(2, item.pdfHeight * 0.20);
+              const padYBot = Math.max(1, item.pdfHeight * 0.08);
 
               if (item.subItems) {
                 for (const sub of item.subItems) {
                   page.drawRectangle({
-                    x: sub.pdfX - 1.5,
-                    y: sub.pdfY - 1,
-                    width: sub.pdfWidth + 3,
-                    height: sub.pdfHeight + 2,
+                    x: sub.pdfX - padX,
+                    y: sub.pdfY - padYBot,
+                    width: sub.pdfWidth + padX * 2,
+                    height: sub.pdfHeight + padYTop + padYBot,
                     color: maskColor,
                   });
                 }
               } else {
                 page.drawRectangle({
-                  x: item.pdfX - 1.5,
-                  y: item.pdfY - 1,
-                  width: item.pdfWidth + 3,
-                  height: item.pdfHeight + 2,
+                  x: item.pdfX - padX,
+                  y: item.pdfY - padYBot,
+                  width: item.pdfWidth + padX * 2,
+                  height: item.pdfHeight + padYTop + padYBot,
                   color: maskColor,
                 });
               }
 
-              // Draw replacement text (using custom Google Font if applicable)
-              let textFont = selectFont(item.fontFamily, item.bold, item.italic);
-              const customFont = await embedCustomFont(outDoc, item.fontFamily, item.bold, item.italic, embeddedFontsCache);
+              // ── Draw replacement text ──
+              let textFont = selectFont(item.fontFamily, item.fontWeightValue, item.italic);
+              const customFont = await embedCustomFont(outDoc, item.fontFamily, itemIsBold, item.italic, embeddedFontsCache);
               if (customFont) {
                 textFont = customFont;
               }
@@ -751,7 +854,9 @@ function EditorWorkspace() {
             const [r, g, b] = hexToRgb(ann.color || '#000000');
 
             if (ann.type === 'text') {
-              let textFont = selectFont(ann.fontFamily, ann.bold, ann.italic);
+              // Annotations store boolean bold; convert to numeric weight for selectFont
+              const annWeight = ann.fontWeightValue || (ann.bold ? 700 : 400);
+              let textFont = selectFont(ann.fontFamily, annWeight, ann.italic);
               const customFont = await embedCustomFont(outDoc, ann.fontFamily, ann.bold, ann.italic, embeddedFontsCache);
               if (customFont) {
                 textFont = customFont;
