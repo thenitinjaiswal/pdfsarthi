@@ -16,47 +16,87 @@ export function useEditor() {
 
 export function EditorProvider({ children }) {
   const toast = useToast();
-  
-  // File state
+
+  // ── File & Page Core States ────────────────────────────────────────────────
   const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [pageCount, setPageCount] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
   const [zoom, setZoom] = useState(1.0); // 1.0 = 100%
-  const [activeTool, setActiveTool] = useState('select'); // 'select', 'edit-text', 'add-text', 'whiteout', 'image', 'signature', 'draw', 'highlight', 'shape'
+  const [activeTool, setActiveTool] = useState('select'); // 'select', 'edit-text', 'add-text', 'find-replace', 'link', 'form-add', 'form-fill', 'signature', 'whiteout', 'annotate', 'shape', 'image'
+  const [formSubMode, setFormSubMode] = useState('add'); // 'add' or 'fill'
   
   // Document metadata per page
-  // Array of { pageNum: number, width: number, height: number, originalTextItems: [...], annotations: [...] }
+  // Array of { pageNum: number, width: number, height: number, rotation: number, originalTextItems: [...], annotations: [...] }
   const [pagesData, setPagesData] = useState([]);
   
   // Active selection state
   const [selectedElement, setSelectedElement] = useState(null); // { pageNum, type: 'annotation'|'text-item', id }
   
-  // Shared properties for newly created elements
+  // ── Element Properties ──────────────────────────────────────────────────────
   const [color, setColor] = useState('#000000');
   const [fontSize, setFontSize] = useState(14);
   const [fontFamily, setFontFamily] = useState('Helvetica');
   const [bold, setBold] = useState(false);
   const [italic, setItalic] = useState(false);
+  const [underline, setUnderline] = useState(false);
+  const [alignment, setAlignment] = useState('left');
   const [strokeWidth, setStrokeWidth] = useState(3);
   const [shapeType, setShapeType] = useState('rect'); // 'rect', 'circle', 'line', 'arrow'
-  
-  // History stacks
+  const [recentColors, setRecentColors] = useState(['#000000', '#ffffff', '#ef4444', '#3b82f6', '#10b981']);
+
+  // ── Signatures & Stamps bank ────────────────────────────────────────────────
+  const [savedSignatures, setSavedSignatures] = useState([]); // array of { id, type: 'draw'|'type'|'upload', dataUrl, text, font }
+  const [savedStamps, setSavedStamps] = useState([
+    { id: 'stamp-1', subject: 'APPROVED', author: 'EDITOR', dateTime: new Date().toLocaleDateString(), color: '#10b981' },
+    { id: 'stamp-2', subject: 'REJECTED', author: 'EDITOR', dateTime: new Date().toLocaleDateString(), color: '#ef4444' },
+    { id: 'stamp-3', subject: 'DRAFT', author: 'EDITOR', dateTime: new Date().toLocaleDateString(), color: '#f59e0b' }
+  ]);
+
+  // ── Find & Replace State ───────────────────────────────────────────────────
+  const [findQuery, setFindQuery] = useState('');
+  const [replaceQuery, setReplaceQuery] = useState('');
+  const [matchCase, setMatchCase] = useState(false);
+  const [includeLinks, setIncludeLinks] = useState(false);
+
+  // ── Alerts & Warnings ──────────────────────────────────────────────────────
+  const [browserZoomAlert, setBrowserZoomAlert] = useState(false);
+  const [scannedDocWarning, setScannedDocWarning] = useState(false);
+  const [xfaWarning, setXfaWarning] = useState(false);
+
+  // ── Font Replacement Dialog ────────────────────────────────────────────────
+  const [fontReplacementOpen, setFontReplacementOpen] = useState(false);
+  const [missingFontName, setMissingFontName] = useState('');
+  const [replacementFontName, setReplacementFontName] = useState('Helvetica');
+  const [alwaysReplaceFont, setAlwaysReplaceFont] = useState(false);
+
+  // ── Undo / Redo stacks ──────────────────────────────────────────────────────
   const [history, setHistory] = useState([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
-  
-  // Clipboard
-  const [clipboard, setClipboard] = useState(null);
+
+  // Monitor browser zoom level to warn user
+  useEffect(() => {
+    const checkZoom = () => {
+      // Modern browsers: ratio of device pixel ratio
+      const ratio = window.devicePixelRatio;
+      if (Math.abs(ratio - 1.0) > 0.15) {
+        setBrowserZoomAlert(true);
+      } else {
+        setBrowserZoomAlert(false);
+      }
+    };
+    checkZoom();
+    window.addEventListener('resize', checkZoom);
+    return () => window.removeEventListener('resize', checkZoom);
+  }, []);
 
   // Sync state changes with history
   const pushHistory = useCallback((newPagesData) => {
-    // Clone state to prevent mutations
     const cloned = JSON.parse(JSON.stringify(newPagesData));
     const nextHistory = history.slice(0, historyIndex + 1);
     nextHistory.push(cloned);
     
-    // Cap history size to 50
     if (nextHistory.length > 50) {
       nextHistory.shift();
     }
@@ -91,10 +131,21 @@ export function EditorProvider({ children }) {
     }
   }, [history, historyIndex, toast]);
 
-  // Keybindings listener helper
+  // Revert selected element only
+  const revertSelected = () => {
+    if (!selectedElement) return;
+    const { pageNum, type, id } = selectedElement;
+    if (type === 'text-item') {
+      updateTextItem(pageNum, id, { newText: null, edited: false });
+      toast.success('Reverted text item to original state');
+    } else if (type === 'annotation') {
+      deleteSelectedElement();
+    }
+  };
+
+  // Keyboard Shortcuts
   useEffect(() => {
     const handleKeyDown = (e) => {
-      // Ignore keybindings when editing a text field
       if (document.activeElement.tagName === 'INPUT' || 
           document.activeElement.tagName === 'TEXTAREA' || 
           document.activeElement.getAttribute('contenteditable') === 'true') {
@@ -121,7 +172,6 @@ export function EditorProvider({ children }) {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [undo, redo, selectedElement]);
 
-  // Reset editor state
   const resetEditor = () => {
     setFile(null);
     setPagesData([]);
@@ -132,16 +182,18 @@ export function EditorProvider({ children }) {
     setSelectedElement(null);
     setHistory([]);
     setHistoryIndex(-1);
+    setSavedSignatures([]);
+    setScannedDocWarning(false);
+    setXfaWarning(false);
   };
 
-  // Setup initial pages data
   const initializePages = (pages) => {
     setPagesData(pages);
     setHistory([JSON.parse(JSON.stringify(pages))]);
     setHistoryIndex(0);
   };
 
-  // Add annotation to a page
+  // ── Annotations Manipulation ───────────────────────────────────────────────
   const addAnnotation = (pageNum, annotationData) => {
     const newAnn = {
       id: uid(),
@@ -154,7 +206,10 @@ export function EditorProvider({ children }) {
       fontFamily,
       bold,
       italic,
+      underline,
       strokeWidth,
+      opacity: 1.0,
+      alignment,
       ...annotationData
     };
     
@@ -173,7 +228,6 @@ export function EditorProvider({ children }) {
     return newAnn.id;
   };
 
-  // Update specific annotation details
   const updateAnnotation = (pageNum, annId, updates) => {
     const updated = pagesData.map(page => {
       if (page.pageNum === pageNum) {
@@ -189,7 +243,6 @@ export function EditorProvider({ children }) {
     setPagesData(updated);
   };
 
-  // Commit updates to history (e.g. after drag-end or font-change)
   const commitAnnotationUpdate = (pageNum, annId, updates) => {
     const updated = pagesData.map(page => {
       if (page.pageNum === pageNum) {
@@ -205,20 +258,20 @@ export function EditorProvider({ children }) {
     updatePagesDataWithHistory(updated);
   };
 
-  // Edit existing extracted text item
-  // `updates` may include `edited` explicitly (e.g. false when text unchanged).
-  // If not provided, default to true so existing call-sites that don't pass `edited` still work.
+  // ── Text Items Manipulation ─────────────────────────────────────────────────
   const updateTextItem = (pageNum, textItemId, updates) => {
     const editedValue = updates.hasOwnProperty('edited') ? updates.edited : true;
     const updated = pagesData.map(page => {
       if (page.pageNum === pageNum) {
         return {
           ...page,
-          originalTextItems: page.originalTextItems.map(item =>
-            item.id === textItemId
-              ? { ...item, ...updates, edited: editedValue }
-              : item
-          )
+          originalTextItems: page.originalTextItems.map(item => {
+            if (item.id === textItemId) {
+              const baseText = updates.newText === null ? item.originalText : (updates.newText !== undefined ? updates.newText : item.newText);
+              return { ...item, ...updates, newText: baseText, edited: editedValue };
+            }
+            return item;
+          })
         };
       }
       return page;
@@ -226,7 +279,6 @@ export function EditorProvider({ children }) {
     updatePagesDataWithHistory(updated);
   };
 
-  // Background analysis color detection updates
   const updateTextItemsColors = (pageNum, colorUpdates) => {
     setPagesData(prevPagesData => prevPagesData.map(page => {
       if (page.pageNum === pageNum) {
@@ -252,7 +304,7 @@ export function EditorProvider({ children }) {
     }));
   };
 
-  // Delete selected annotation or reset text item
+  // ── Deleting / Reordering ──────────────────────────────────────────────────
   const deleteSelectedElement = () => {
     if (!selectedElement) return;
     const { pageNum, type, id } = selectedElement;
@@ -270,7 +322,6 @@ export function EditorProvider({ children }) {
       updatePagesDataWithHistory(updated);
       toast.success('Annotation deleted');
     } else if (type === 'text-item') {
-      // Revert edited text back to original
       const updated = pagesData.map(page => {
         if (page.pageNum === pageNum) {
           return {
@@ -289,7 +340,6 @@ export function EditorProvider({ children }) {
     setSelectedElement(null);
   };
 
-  // Duplicate an annotation
   const duplicateAnnotation = (pageNum, annId) => {
     const page = pagesData.find(p => p.pageNum === pageNum);
     if (!page) return;
@@ -318,7 +368,7 @@ export function EditorProvider({ children }) {
     toast.success('Annotation duplicated');
   };
 
-  // Page manipulation
+  // ── Page Management Handlers ───────────────────────────────────────────────
   const deletePage = (pageNum) => {
     if (pagesData.length <= 1) {
       toast.error('Cannot delete the last page.');
@@ -353,6 +403,32 @@ export function EditorProvider({ children }) {
     toast.success(`Page ${pageNum} rotated`);
   };
 
+  const insertBlankPage = (pageNum, position = 'after') => {
+    const pageIndex = pagesData.findIndex(p => p.pageNum === pageNum);
+    if (pageIndex === -1) return;
+
+    const referencePage = pagesData[pageIndex];
+    const newPage = {
+      pageNum: 0, // temporary index
+      originalPageNum: -1, // -1 denotes a new blank page
+      width: referencePage.width,
+      height: referencePage.height,
+      rotation: 0,
+      originalTextItems: [],
+      annotations: []
+    };
+
+    const updated = [...pagesData];
+    const insertIdx = position === 'after' ? pageIndex + 1 : pageIndex;
+    updated.splice(insertIdx, 0, newPage);
+
+    // Re-index all pages
+    const reindexed = updated.map((p, idx) => ({ ...p, pageNum: idx + 1 }));
+    setPageCount(reindexed.length);
+    updatePagesDataWithHistory(reindexed);
+    toast.success('Blank page inserted');
+  };
+
   const reorderPages = (activeId, overId) => {
     if (activeId === overId) return;
     
@@ -365,11 +441,24 @@ export function EditorProvider({ children }) {
     const [movedPage] = updated.splice(activeIdx, 1);
     updated.splice(overIdx, 0, movedPage);
     
-    // Re-index pages
     const reindexed = updated.map((p, idx) => ({ ...p, pageNum: idx + 1 }));
     
     updatePagesDataWithHistory(reindexed);
     toast.success('Pages reordered');
+  };
+
+  const movePageToLocation = (fromPageNum, toPageNum) => {
+    const fromIdx = pagesData.findIndex(p => p.pageNum === fromPageNum);
+    const toIdx = Math.max(0, Math.min(pagesData.length - 1, toPageNum - 1));
+    if (fromIdx === -1 || fromIdx === toIdx) return;
+
+    const updated = [...pagesData];
+    const [movedPage] = updated.splice(fromIdx, 1);
+    updated.splice(toIdx, 0, movedPage);
+
+    const reindexed = updated.map((p, idx) => ({ ...p, pageNum: idx + 1 }));
+    updatePagesDataWithHistory(reindexed);
+    toast.success(`Page ${fromPageNum} moved to position ${toPageNum}`);
   };
 
   const value = {
@@ -380,6 +469,7 @@ export function EditorProvider({ children }) {
     currentPage, setCurrentPage,
     zoom, setZoom,
     activeTool, setActiveTool,
+    formSubMode, setFormSubMode,
     pagesData, setPagesData,
     selectedElement, setSelectedElement,
     color, setColor,
@@ -387,9 +477,25 @@ export function EditorProvider({ children }) {
     fontFamily, setFontFamily,
     bold, setBold,
     italic, setItalic,
+    underline, setUnderline,
+    alignment, setAlignment,
     strokeWidth, setStrokeWidth,
     shapeType, setShapeType,
-    undo, redo,
+    recentColors, setRecentColors,
+    savedSignatures, setSavedSignatures,
+    savedStamps, setSavedStamps,
+    findQuery, setFindQuery,
+    replaceQuery, setReplaceQuery,
+    matchCase, setMatchCase,
+    includeLinks, setIncludeLinks,
+    browserZoomAlert,
+    scannedDocWarning, setScannedDocWarning,
+    xfaWarning, setXfaWarning,
+    fontReplacementOpen, setFontReplacementOpen,
+    missingFontName, setMissingFontName,
+    replacementFontName, setReplacementFontName,
+    alwaysReplaceFont, setAlwaysReplaceFont,
+    undo, redo, revertSelected,
     canUndo: historyIndex > 0,
     canRedo: historyIndex < history.length - 1,
     resetEditor,
@@ -403,7 +509,9 @@ export function EditorProvider({ children }) {
     duplicateAnnotation,
     deletePage,
     rotatePage,
-    reorderPages
+    insertBlankPage,
+    reorderPages,
+    movePageToLocation
   };
 
   return (

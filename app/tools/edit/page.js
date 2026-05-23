@@ -13,7 +13,7 @@ import { PenLine, Upload, Loader, FileText, ChevronLeft } from 'lucide-react';
 import ToolHeader from '@/components/tools/ToolHeader';
 import UploadZone from '@/components/tools/UploadZone';
 import { useToast } from '@/hooks/useToast';
-import { formatSize, downloadBlob } from '@/lib/utils';
+import { formatSize, downloadBlob, uid } from '@/lib/utils';
 import { renderPageThumbnail, readFileAsArrayBuffer } from '@/lib/pdf-service';
 
 const GOOGLE_FONTS = {
@@ -83,6 +83,374 @@ const FONT_FALLBACKS = {
   'comic sans': 'Poppins'
 };
 
+function extractFontNamesFromOperatorList(operatorList, OPS) {
+  const fontNames = new Set();
+  if (!operatorList || !operatorList.fnArray || !operatorList.argsArray || !OPS) return fontNames;
+
+  const setFontOp = OPS.setFont;
+  for (let index = 0; index < operatorList.fnArray.length; index++) {
+    if (operatorList.fnArray[index] === setFontOp) {
+      const args = operatorList.argsArray[index];
+      if (Array.isArray(args) && typeof args[0] === 'string') {
+        fontNames.add(args[0]);
+      }
+    }
+  }
+
+  return fontNames;
+}
+
+function resolveFontObject(fontName, commonObjs, objs) {
+  if (!fontName) return null;
+
+  const resolver = (obj) => {
+    if (!obj || typeof obj.has !== 'function') return null;
+    try {
+      if (!obj.has(fontName)) return null;
+      if (typeof obj.get === 'function') return obj.get(fontName);
+      if (typeof obj.getData === 'function') return obj.getData(fontName);
+    } catch (err) {
+      console.error('Error resolving font object for', fontName, err);
+    }
+    return null;
+  };
+
+  return resolver(commonObjs) || resolver(objs) || null;
+}
+
+function parseFontNameFamily(rawName) {
+  if (!rawName || typeof rawName !== 'string') return '';
+  const cleaned = rawName.replace(/^[^A-Za-z0-9]+/, '');
+  const splitByPlus = cleaned.split('+').pop();
+  const splitByComma = splitByPlus.split(',')[0];
+  return splitByComma.trim();
+}
+
+function normalizeFontName(fontName) {
+  return (fontName || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function inferFontFamily(fontName, cssFontFamily) {
+  const normalizedRaw = normalizeFontName(cssFontFamily || fontName);
+  let family = 'Helvetica';
+
+  if (normalizedRaw.includes('times') || normalizedRaw.includes('serif') || normalizedRaw.includes('roman') || normalizedRaw.includes('georgia')) {
+    family = 'TimesRoman';
+  } else if (normalizedRaw.includes('courier') || normalizedRaw.includes('mono') || normalizedRaw.includes('code')) {
+    family = 'Courier';
+  } else if (normalizedRaw.includes('roboto')) {
+    family = 'Roboto';
+  } else if (normalizedRaw.includes('open sans')) {
+    family = 'Open Sans';
+  } else if (normalizedRaw.includes('montserrat')) {
+    family = 'Montserrat';
+  } else if (normalizedRaw.includes('lora')) {
+    family = 'Lora';
+  } else if (normalizedRaw.includes('merriweather')) {
+    family = 'Merriweather';
+  } else if (normalizedRaw.includes('inter')) {
+    family = 'Inter';
+  } else if (normalizedRaw.includes('poppins')) {
+    family = 'Poppins';
+  } else {
+    for (const [key, value] of Object.entries(FONT_FALLBACKS)) {
+      if (normalizedRaw.includes(key)) {
+        family = value;
+        break;
+      }
+    }
+  }
+
+  return family;
+}
+
+function inferWeightStyle(fontName, cssFontFamily, style, fontObj) {
+  const normalizedName = normalizeFontName(fontName || cssFontFamily);
+  const normalizedCssFamily = normalizeFontName(cssFontFamily || '');
+  let weight = 400;
+  let fontStyle = 'normal';
+
+  const rawWeight = style?.fontWeight;
+  const rawStyle = style?.fontStyle;
+  if (rawWeight !== undefined && rawWeight !== null) {
+    const parsed = Number(rawWeight);
+    if (!Number.isNaN(parsed) && parsed > 0) {
+      weight = parsed;
+    } else if (String(rawWeight).toLowerCase() === 'bold') {
+      weight = 700;
+    } else if (String(rawWeight).toLowerCase() === 'bolder') {
+      weight = 800;
+    } else if (String(rawWeight).toLowerCase() === 'normal') {
+      weight = 400;
+    }
+  }
+
+  if (rawStyle === 'italic' || rawStyle === 'oblique') {
+    fontStyle = 'italic';
+  }
+
+  if (fontObj?.cssFontInfo) {
+    const fontInfo = fontObj.cssFontInfo;
+    if (fontInfo.fontWeight) {
+      const parsed = Number(fontInfo.fontWeight);
+      if (!Number.isNaN(parsed) && parsed > 0) {
+        weight = parsed;
+      } else if (String(fontInfo.fontWeight).toLowerCase() === 'bold') {
+        weight = 700;
+      }
+    }
+    if (fontInfo.fontStyle === 'italic' || fontInfo.fontStyle === 'oblique') {
+      fontStyle = 'italic';
+    }
+  }
+
+  const nameBold = normalizedName.includes('bold') || normalizedName.includes('black') || normalizedName.includes('heavy') || normalizedName.includes('semibold') || normalizedName.includes('demibold') || normalizedName.includes('-bd') || normalizedName.includes('_bd') || normalizedName.includes('.bd') || normalizedName.includes(',bold');
+  const nameItalic = normalizedName.includes('italic') || normalizedName.includes('oblique') || normalizedName.includes('slanted') || normalizedName.includes('-it') || normalizedName.includes('_it') || normalizedName.includes('.it') || normalizedName.includes('-obl') || normalizedName.includes('_obl') || normalizedName.includes('.obl');
+
+  if (nameBold && weight < 600) {
+    weight = normalizedName.includes('black') ? 900 : 700;
+  }
+  if (nameItalic) {
+    fontStyle = 'italic';
+  }
+
+  if (fontObj) {
+    if (fontObj.isBold || fontObj.bold || (fontObj.flags && (fontObj.flags & 262144))) {
+      weight = Math.max(weight, 700);
+    }
+    if (fontObj.isItalic || fontObj.italic || (fontObj.flags && (fontObj.flags & 64))) {
+      fontStyle = 'italic';
+    }
+  }
+
+  if (normalizedCssFamily.includes('bold') && weight < 600) {
+    weight = 700;
+  }
+  if (normalizedCssFamily.includes('italic') || normalizedCssFamily.includes('oblique')) {
+    fontStyle = 'italic';
+  }
+
+  return { weight, fontStyle };
+}
+
+async function buildFontNameSet(page, OPS) {
+  try {
+    const operatorList = await page.getOperatorList();
+    return extractFontNamesFromOperatorList(operatorList, OPS);
+  } catch (err) {
+    console.warn('Unable to build font name set from operator list:', err);
+    return new Set();
+  }
+}
+
+function hexFromRgb(r, g, b) {
+  const toByte = (value) => {
+    const num = Math.round(Number(value) * 255);
+    return Math.min(255, Math.max(0, num));
+  };
+  return `#${[r, g, b].map(toByte).map((n) => n.toString(16).padStart(2, '0')).join('')}`;
+}
+
+function hexFromGray(g) {
+  const gray = Math.min(255, Math.max(0, Math.round(Number(g) * 255)));
+  return `#${[gray, gray, gray].map((n) => n.toString(16).padStart(2, '0')).join('')}`;
+}
+
+function hexFromCmyk(c, m, y, k) {
+  const toByte = (value, key) => {
+    const cmyk = Number(value);
+    const black = Number(key);
+    const rgb = 1 - Math.min(1, cmyk + black);
+    return Math.min(255, Math.max(0, Math.round(rgb * 255)));
+  };
+  return `#${[c, m, y, k].map((val, idx) => toByte(val, idx === 3 ? k : 0)).map((n) => n.toString(16).padStart(2, '0')).join('')}`;
+}
+
+function getPdfFillColorFromArgs(args, colorSpace) {
+  if (!Array.isArray(args)) return '#000000';
+  if (colorSpace?.includes('DeviceRGB') || args.length === 3) {
+    return hexFromRgb(args[0], args[1], args[2]);
+  }
+  if (colorSpace?.includes('DeviceGray') || args.length === 1) {
+    return hexFromGray(args[0]);
+  }
+  if (colorSpace?.includes('DeviceCMYK') || args.length === 4) {
+    return hexFromCmyk(args[0], args[1], args[2], args[3]);
+  }
+  return '#000000';
+}
+
+function getRectOverlap(rectA, rectB) {
+  const x1 = Math.max(rectA.x, rectB.x);
+  const y1 = Math.max(rectA.y, rectB.y);
+  const x2 = Math.min(rectA.x + rectA.width, rectB.x + rectB.width);
+  const y2 = Math.min(rectA.y + rectA.height, rectB.y + rectB.height);
+  const width = Math.max(0, x2 - x1);
+  const height = Math.max(0, y2 - y1);
+  return width * height;
+}
+
+async function extractPageTextItems(pdfjsPage, pageViewport) {
+  const pdfjsLib = await import('pdfjs-dist');
+  return extractPageTextItemsWithOPS(pdfjsPage, pageViewport, pdfjsLib.OPS);
+}
+
+async function extractPageTextItemsWithOPS(page, viewport, OPS) {
+  const [textContent, operatorList] = await Promise.all([
+    page.getTextContent({ includeMarkedContent: true }),
+    page.getOperatorList(),
+  ]);
+
+  const items = textContent.items || [];
+  const styles = textContent.styles || {};
+
+  let currentFillColor = '#000000';
+  let fillColorSpace = 'DeviceGray';
+  let currentFontName = null;
+  let pendingRect = null;
+  const backgroundRects = [];
+  let textItemIndex = 0;
+
+  const fillOps = new Set([
+    OPS.fill,
+    OPS.eoFill,
+    OPS.fillStroke,
+    OPS.eoFillStroke,
+  ]);
+  const textShowOps = new Set([
+    OPS.showText,
+    OPS.nextLineShowText,
+    OPS.showSpacedText,
+  ]);
+
+  const assignCurrentColor = () => {
+    if (textItemIndex >= items.length) return;
+    const item = items[textItemIndex];
+    item.color = currentFillColor;
+    item.colorsDetected = true;
+    const resolvedFontName = item.fontName || currentFontName;
+    if (resolvedFontName) {
+      if (!item.fontName) {
+        item.fontName = resolvedFontName;
+      }
+      const fontObj = resolveFontObject(resolvedFontName, page.commonObjs, page.objs);
+      if (fontObj) {
+        const style = (styles && styles[resolvedFontName]) || {};
+        const { weight, fontStyle } = inferWeightStyle(resolvedFontName, style.fontFamily, style, fontObj);
+        item.fontWeight = weight;
+        item.fontWeightValue = weight;
+        item.fontStyle = fontStyle;
+        item.bold = weight >= 600;
+        item.italic = fontStyle === 'italic';
+      }
+    }
+    textItemIndex += 1;
+  };
+
+  for (let index = 0; index < operatorList.fnArray.length; index++) {
+    const fn = operatorList.fnArray[index];
+    const args = operatorList.argsArray[index];
+
+    if (fn === OPS.setFillColorSpace || fn === OPS.setStrokeColorSpace) {
+      fillColorSpace = String(args?.[0] || fillColorSpace);
+      continue;
+    }
+
+    if (fn === OPS.setFillGray) {
+      currentFillColor = hexFromGray(args?.[0] ?? 0);
+      fillColorSpace = 'DeviceGray';
+      continue;
+    }
+
+    if (fn === OPS.setFillRGBColor) {
+      currentFillColor = hexFromRgb(args?.[0] ?? 0, args?.[1] ?? 0, args?.[2] ?? 0);
+      fillColorSpace = 'DeviceRGB';
+      continue;
+    }
+
+    if (fn === OPS.setFillCMYKColor) {
+      currentFillColor = hexFromCmyk(args?.[0] ?? 0, args?.[1] ?? 0, args?.[2] ?? 0, args?.[3] ?? 0);
+      fillColorSpace = 'DeviceCMYK';
+      continue;
+    }
+
+    if (fn === OPS.setFillColor) {
+      currentFillColor = getPdfFillColorFromArgs(args, fillColorSpace);
+      continue;
+    }
+
+    if (fn === OPS.setFont) {
+      currentFontName = String(args?.[0] || currentFontName);
+      continue;
+    }
+
+    if (fn === OPS.rectangle) {
+      const [x, y, width, height] = args || [0, 0, 0, 0];
+      pendingRect = { x, y, width, height, color: currentFillColor };
+      continue;
+    }
+
+    if (fillOps.has(fn)) {
+      if (pendingRect) {
+        backgroundRects.push({ ...pendingRect });
+        pendingRect = null;
+      }
+      continue;
+    }
+
+    if (textShowOps.has(fn)) {
+      assignCurrentColor();
+      continue;
+    }
+
+    if (fn === OPS.nextLine) {
+      continue;
+    }
+  }
+
+  items.forEach((item) => {
+    if (item.color === undefined || item.color === null) {
+      item.color = '#000000';
+    }
+
+    if (!item.bgColor) {
+      let bestRect = null;
+      let bestOverlap = 0;
+      const pdfX = item.transform ? item.transform[4] : 0;
+      const pdfY = item.transform ? item.transform[5] : 0;
+      const textRect = {
+        x: pdfX,
+        y: pdfY,
+        width: item.width || 0,
+        height: item.height || 0,
+      };
+      for (const rect of backgroundRects) {
+        const overlap = getRectOverlap(textRect, rect);
+        if (overlap > bestOverlap) {
+          bestRect = rect;
+          bestOverlap = overlap;
+        }
+      }
+      if (bestRect && bestOverlap > 0) {
+        item.bgColor = bestRect.color || '#ffffff';
+      } else {
+        item.bgColor = null;
+      }
+    }
+  });
+
+  const groupedItems = groupTextItems(items, styles, viewport, page.commonObjs, page.objs);
+
+  return groupedItems.map((item) => ({
+    ...item,
+    id: item.id || `text-item-${uid()}`,
+    originalText: item.str,
+    newText: item.str,
+    edited: false,
+    colorsDetected: true,
+  }));
+}
+
 async function embedCustomFont(outDoc, family, bold, italic, embeddedFontsCache) {
   let fontKey = family || 'Helvetica';
   const standardFonts = ['Helvetica', 'TimesRoman', 'Courier'];
@@ -131,7 +499,7 @@ async function embedCustomFont(outDoc, family, bold, italic, embeddedFontsCache)
 }
 
 // Merging adjacent text content blocks
-function groupTextItems(items, styles, viewport, commonObjs) {
+function groupTextItems(items, styles, viewport, commonObjs, objs, operatorFontNames = new Set()) {
   if (items.length === 0) return [];
   
   const pageWidth = viewport.width;
@@ -141,172 +509,50 @@ function groupTextItems(items, styles, viewport, commonObjs) {
     .filter(item => item.str && item.str.trim().length > 0)
     .map((item, idx) => {
       const { str, transform, width, height, fontName } = item;
-      
+
+      const scaleX = Math.sqrt(transform[0] * transform[0] + transform[1] * transform[1]);
+      const scaleY = Math.sqrt(transform[2] * transform[2] + transform[3] * transform[3]);
+      const size = Math.max(scaleX, scaleY) || 12; // precise font size in PDF points
+
       const pdfX = transform[4];
       const pdfY = transform[5];
       
-      // Convert to viewport scale 1.0 (points)
+      // Convert to viewport coordinates for overlay placement.
+      // NOTE: Use the raw PDF `height` here; do NOT substitute `size` as fallback
+      // because that would shift `top` and break the canvas-erase rectangle position.
+      // The lineHeight below already guards against a zero/tiny h.
       const [x1, y1] = viewport.convertToViewportPoint(pdfX, pdfY);
       const [x2, y2] = viewport.convertToViewportPoint(pdfX + width, pdfY + height);
       
       const left = Math.min(x1, x2);
       const top = Math.min(y1, y2);
-      const w = Math.abs(x1 - x2);
-      const h = Math.abs(y1 - y2);
+      const w = Math.max(1, Math.abs(x1 - x2));
+      const h = Math.max(1, Math.abs(y1 - y2));
       
-      const scaleX = Math.sqrt(transform[0] * transform[0] + transform[1] * transform[1]);
-      const scaleY = Math.sqrt(transform[2] * transform[2] + transform[3] * transform[3]);
-      const size = Math.max(scaleX, scaleY); // Keep precise decimal for pixel-perfect font size
+      const lineHeight = Math.max(h, size * 1.2);
       
-      // Font detection from resources if available
-      let fontObj = null;
-      try {
-        if (commonObjs && typeof commonObjs.has === 'function' && commonObjs.has(fontName)) {
-          if (typeof commonObjs.get === 'function') {
-            fontObj = commonObjs.get(fontName);
-          } else if (typeof commonObjs.getData === 'function') {
-            fontObj = commonObjs.getData(fontName);
-          }
-        }
-      } catch (e) {
-        console.error('Failed to get fontObj from commonObjs:', e);
-      }
-      
-      const postscriptName = fontObj ? (fontObj.name || fontObj.fallbackName || '') : '';
-      
-      // Detailed font object inspection for bold/italic flags
-      let isObjBold = false;
-      let isObjItalic = false;
-      if (fontObj) {
-        if (fontObj.isBold || fontObj.bold) isObjBold = true;
-        if (fontObj.isItalic || fontObj.italic) isObjItalic = true;
-        
-        // Check standard PDF FontDescriptor flags (bit 6 = Italic, bit 19 = ForceBold)
-        if (fontObj.flags) {
-          if (fontObj.flags & 262144) isObjBold = true;
-          if (fontObj.flags & 64) isObjItalic = true;
-        }
-        
-        // Check cssFontInfo if available (newer PDF.js versions)
-        if (fontObj.cssFontInfo) {
-          if (fontObj.cssFontInfo.fontWeight >= 600 || fontObj.cssFontInfo.fontWeight === 'bold') isObjBold = true;
-          if (fontObj.cssFontInfo.fontStyle === 'italic' || fontObj.cssFontInfo.fontStyle === 'oblique') isObjItalic = true;
-        }
-      }
-      
+      // Resolve actual PDF font resource from text item name.
+      const fontObj = resolveFontObject(fontName, commonObjs, objs);
+      const resolvedFontName = fontObj ? (fontObj.loadedName || fontObj.name || fontObj.fallbackName || fontName) : fontName;
+      const parsedName = parseFontNameFamily(resolvedFontName || fontName);
       const style = (styles && styles[fontName]) || {};
       const cssFontFamily = style.fontFamily || '';
-      const loadedName = fontObj ? (fontObj.loadedName || fontObj.name) : null;
+      const cssFontFamilyRaw = resolvedFontName || cssFontFamily || fontName || '';
+
+      const preWeight = item.fontWeightValue !== undefined ? item.fontWeightValue : null;
+      const preStyle = item.fontStyle !== undefined ? item.fontStyle : null;
       
-      const cssFontFamilyLower = cssFontFamily.toLowerCase();
-      const fontNameLower = (fontName || '').toLowerCase();
-      const resolvedFontName = (postscriptName || fontName || '').toLowerCase();
-
-      // ── PRIORITY 1: Read fontWeight and fontStyle directly from PDF.js style object ──
-      // style.fontWeight is a number (100-900) or string like 'bold'/'normal'
-      // style.fontStyle is 'normal', 'italic', or 'oblique'
-      const rawFontWeight = style.fontWeight; // number OR string
-      const rawFontStyle  = style.fontStyle;  // 'normal' | 'italic' | 'oblique'
-
-      // Convert raw fontWeight to a reliable number (0 if unavailable)
-      let numericWeight = 0;
-      if (rawFontWeight !== undefined && rawFontWeight !== null) {
-        const parsed = Number(rawFontWeight);
-        if (!isNaN(parsed)) {
-          numericWeight = parsed;
-        } else if (String(rawFontWeight).toLowerCase() === 'bold'   ) numericWeight = 700;
-        else if (String(rawFontWeight).toLowerCase() === 'bolder'  ) numericWeight = 800;
-        else if (String(rawFontWeight).toLowerCase() === 'normal'  ) numericWeight = 400;
+      let fontWeight = preWeight;
+      let fontStyle = preStyle;
+      if (fontWeight === null || fontStyle === null) {
+        const inferred = inferWeightStyle(resolvedFontName, cssFontFamily, style, fontObj);
+        if (fontWeight === null) fontWeight = inferred.weight;
+        if (fontStyle === null) fontStyle = inferred.fontStyle;
       }
+      const bold = fontWeight >= 600;
+      const italic = fontStyle === 'italic';
 
-      const styleIsBold   = numericWeight >= 600;
-      const styleIsItalic = rawFontStyle === 'italic' || rawFontStyle === 'oblique';
-
-      // ── PRIORITY 2: PostScript / internal font name heuristics ──
-      const nameBold = resolvedFontName.includes('bold') ||
-                       resolvedFontName.includes('bld')  ||
-                       resolvedFontName.includes('heavy')||
-                       resolvedFontName.includes('black')||
-                       resolvedFontName.includes('semibold') ||
-                       resolvedFontName.includes('demibold') ||
-                       resolvedFontName.includes('demi') ||
-                       resolvedFontName.includes('-bd')  ||
-                       resolvedFontName.includes('_bd')  ||
-                       resolvedFontName.includes('.bd')  ||
-                       resolvedFontName.includes(',bold');
-
-      const nameItalic = resolvedFontName.includes('italic') ||
-                         resolvedFontName.includes('oblique') ||
-                         resolvedFontName.includes('slanted') ||
-                         resolvedFontName.includes('-it')  ||
-                         resolvedFontName.includes('_it')  ||
-                         resolvedFontName.includes('.it')  ||
-                         resolvedFontName.includes('-obl') ||
-                         resolvedFontName.includes('_obl') ||
-                         resolvedFontName.includes('.obl');
-
-      // ── PRIORITY 3: CSS fontFamily string fallback ──
-      const cssBold   = cssFontFamilyLower.includes('bold')    ||
-                        cssFontFamilyLower.includes('semibold') ||
-                        cssFontFamilyLower.includes('700')      ||
-                        cssFontFamilyLower.includes('800')      ||
-                        cssFontFamilyLower.includes('900');
-
-      const cssItalic = cssFontFamilyLower.includes('italic')  ||
-                        cssFontFamilyLower.includes('oblique') ||
-                        cssFontFamilyLower.includes('slanted');
-
-      // ── PRIORITY 4: Detect faux-italic (oblique) via transformation matrix skew ──
-      // In a 2D affine matrix [a, b, c, d, e, f], 'c' (transform[2]) is the horizontal skew.
-      // A significant skew angle indicates the PDF generator applied a fake italic slant.
-      const hasItalicSkew = Math.abs(transform[2]) > 0.1;
-
-      const bold   = isObjBold   || styleIsBold   || nameBold   || cssBold;
-      const italic = isObjItalic || styleIsItalic || nameItalic || cssItalic || hasItalicSkew;
-
-      // Store the precise numeric weight for CSS rendering accuracy (semibold=600, black=900 etc.)
-      // If numericWeight is known use it; else fall back to 700/400
-      const fontWeightValue = numericWeight > 0
-        ? numericWeight
-        : (bold ? 700 : 400);
-      
-      let family = 'Helvetica';
-      const normalizedRaw = cssFontFamilyLower.trim();
-      const matchedGoogleFont = Object.keys(GOOGLE_FONTS).find(
-        key => normalizedRaw.includes(key.toLowerCase())
-      );
-
-      if (matchedGoogleFont) {
-        family = matchedGoogleFont;
-      } else {
-        let fallbackMatched = false;
-        for (const [key, value] of Object.entries(FONT_FALLBACKS)) {
-          if (normalizedRaw.includes(key)) {
-            family = value;
-            fallbackMatched = true;
-            break;
-          }
-        }
-
-        if (!fallbackMatched) {
-          if (normalizedRaw.includes('times') || 
-              normalizedRaw.includes('serif') || 
-              normalizedRaw.includes('roman') ||
-              normalizedRaw.includes('georgia') ||
-              normalizedRaw.includes('minion') ||
-              fontNameLower.includes('times') || 
-              fontNameLower.includes('serif') ||
-              fontNameLower.includes('roman')) {
-            family = 'TimesRoman';
-          } else if (normalizedRaw.includes('courier') || 
-                     normalizedRaw.includes('mono') || 
-                     normalizedRaw.includes('code') ||
-                     fontNameLower.includes('courier') || 
-                     fontNameLower.includes('mono')) {
-            family = 'Courier';
-          }
-        }
-      }
+      const fontFamily = inferFontFamily(parsedName || resolvedFontName || cssFontFamily, cssFontFamily);
       
       // Auto-detect alignment
       let alignment = 'left';
@@ -318,33 +564,6 @@ function groupTextItems(items, styles, viewport, commonObjs) {
         alignment = 'right';
       }
       
-      // ─── DEBUG: Log raw font data for first 5 items ───
-      if (idx < 5) {
-        console.log(`🔍 TEXT ITEM #${idx}: "${str.substring(0, 30)}"`, {
-          fontName,
-          postscriptName,
-          loadedName,
-          cssFontFamily,
-          rawFontWeight,
-          rawFontStyle,
-          numericWeight,
-          isObjBold,
-          isObjItalic,
-          nameBold,
-          nameItalic,
-          bold,
-          italic,
-          fontWeightValue,
-          fontObjKeys: fontObj ? Object.keys(fontObj) : 'null',
-          fontObjBold: fontObj?.bold,
-          fontObjIsBold: fontObj?.isBold,
-          fontObjFlags: fontObj?.flags,
-          fontObjData: fontObj?.data ? 'has data' : 'no data',
-          styleKeys: Object.keys(style),
-          styleObj: JSON.parse(JSON.stringify(style)),
-        });
-      }
-
       return {
         id: `text-item-${idx}`,
         str,
@@ -357,19 +576,19 @@ function groupTextItems(items, styles, viewport, commonObjs) {
         left,
         top,
         width: w,
-        height: h,
-        fontSize: size || 12,
+        height: lineHeight,
+        fontSize: size,
         fontName,
         edited: false,
-        color: '#000000',
+        color: item.color || '#000000',
+        bgColor: item.bgColor || null,
         bold,
         italic,
-        fontWeightValue,
-        // cssFontFamilyRaw: exact font family from PDF.js (e.g. "g_d0_f1")
-        // Used for on-screen overlay to match the PDF exactly
-        cssFontFamilyRaw: loadedName || cssFontFamily || null,
-        // fontFamily: pdf-lib compatible bucket used only for export
-        fontFamily: family,
+        fontWeight: fontWeight,
+        fontWeightValue: fontWeight,
+        fontStyle,
+        cssFontFamilyRaw,
+        fontFamily,
         alignment,
       };
     });
@@ -446,6 +665,9 @@ function mergeGroup(group, pageWidth) {
   const mergedFontWeightValue = Math.round(
     group.reduce((sum, g) => sum + (g.fontWeightValue || (g.bold ? 700 : 400)) * g.str.length, 0) / totalLength
   );
+
+  const mergedColor = group.find(g => g.color)?.color || first.color || '#000000';
+  const mergedBgColor = group.find(g => g.bgColor)?.bgColor || first.bgColor || null;
   
   // Auto-detect alignment for merged group
   let alignment = 'left';
@@ -473,7 +695,8 @@ function mergeGroup(group, pageWidth) {
     fontSize: mergedFontSize,
     fontName: first.fontName,
     edited: false,
-    color: '#000000',
+    color: mergedColor,
+    bgColor: mergedBgColor,
     bold: mergedBold,
     italic: mergedItalic,
     fontWeightValue: mergedFontWeightValue,
@@ -493,10 +716,14 @@ function EditorWorkspace() {
     exporting, setExporting,
     pagesData, initializePages,
     setPageCount,
-    addAnnotation
+    addAnnotation,
+    selectedElement,
+    commitAnnotationUpdate
   } = useEditor();
 
   const [pdfjsDoc, setPdfjsDoc] = useState(null);
+  const pdfjsDocRef = useRef(null);
+  const stablePdfjsDoc = pdfjsDocRef.current || pdfjsDoc;
   const [thumbnails, setThumbnails] = useState({});
   const fileInputRef = useRef(null);
 
@@ -513,6 +740,7 @@ function EditorWorkspace() {
     setLoading(true);
     setThumbnails({});
     setPdfjsDoc(null);
+    pdfjsDocRef.current = null;
     
     try {
       const pdfjsLib = await import('pdfjs-dist');
@@ -520,6 +748,7 @@ function EditorWorkspace() {
       
       const buffer = await readFileAsArrayBuffer(f);
       const doc = await pdfjsLib.getDocument({ data: buffer }).promise;
+      pdfjsDocRef.current = doc;
       setPdfjsDoc(doc);
       setPageCount(doc.numPages);
 
@@ -528,9 +757,7 @@ function EditorWorkspace() {
       for (let i = 1; i <= doc.numPages; i++) {
         const page = await doc.getPage(i);
         const viewport = page.getViewport({ scale: 1.0 });
-        // Retrieve the text content for the page before grouping
-        const textContent = await page.getTextContent();
-        const grouped = groupTextItems(textContent.items, textContent.styles, viewport, page.commonObjs);
+        const originalTextItems = await extractPageTextItems(page, viewport);
 
         parsedPages.push({
           pageNum: i,
@@ -538,7 +765,7 @@ function EditorWorkspace() {
           width: viewport.width,
           height: viewport.height,
           rotation: page.rotation || 0,
-          originalTextItems: grouped,
+          originalTextItems,
           annotations: []
         });
       }
@@ -599,13 +826,26 @@ function EditorWorkspace() {
 
   // Signature drawing save
   const handleSaveSignature = (sigDataUrl) => {
-    addAnnotation(1, {
+    if (selectedElement && selectedElement.type === 'annotation') {
+      const page = pagesData.find(p => p.pageNum === selectedElement.pageNum);
+      const ann = page?.annotations?.find(a => a.id === selectedElement.id);
+      if (ann && ann.type === 'form-field' && ann.fieldType === 'signature') {
+        commitAnnotationUpdate(selectedElement.pageNum, selectedElement.id, {
+          signatureData: sigDataUrl
+        });
+        toast.success('Signature field successfully signed!');
+        return;
+      }
+    }
+
+    const pageToUse = selectedElement?.pageNum || 1;
+    addAnnotation(pageToUse, {
       type: 'signature',
       dataUrl: sigDataUrl,
       width: 140,
       height: 60
     });
-    toast.success('Signature added to page 1. Drag to position.');
+    toast.success(`Signature added to page ${pageToUse}. Drag to position.`);
   };
 
   // OCR Execution handler
@@ -707,7 +947,7 @@ function EditorWorkspace() {
     setExporting(true);
     
     try {
-      const { PDFDocument, rgb, StandardFonts, degrees } = await import('pdf-lib');
+      const { PDFDocument, rgb, StandardFonts, degrees, PDFString } = await import('pdf-lib');
       
       // Load source arraybuffer
       const srcBuffer = await readFileAsArrayBuffer(file);
@@ -994,6 +1234,171 @@ function EditorWorkspace() {
                   color: rgb(r, g, b),
                 });
               }
+            } else if (ann.type === 'stamp') {
+              // Draw visual stamp border
+              page.drawRectangle({
+                x: ann.x,
+                y: H_pdf - ann.y - ann.height,
+                width: ann.width,
+                height: ann.height,
+                borderColor: rgb(r, g, b),
+                borderWidth: 2,
+              });
+              // Draw Stamp main subject text (centered bold)
+              const stampFont = fonts.HelveticaBold;
+              const titleSize = 14;
+              const titleWidth = stampFont.widthOfTextAtSize(ann.subject || 'STAMP', titleSize);
+              page.drawText(ann.subject || 'STAMP', {
+                x: ann.x + (ann.width - titleWidth) / 2,
+                y: H_pdf - ann.y - 25,
+                size: titleSize,
+                font: stampFont,
+                color: rgb(r, g, b),
+              });
+              // Draw Stamp metadata subtext (centered normal)
+              const subText = `${ann.author || 'AUTHOR'} • ${ann.dateTime || ''}`;
+              const subFont = fonts.Helvetica;
+              const subSize = 7;
+              const subWidth = subFont.widthOfTextAtSize(subText, subSize);
+              page.drawText(subText, {
+                x: ann.x + (ann.width - subWidth) / 2,
+                y: H_pdf - ann.y - 45,
+                size: subSize,
+                font: subFont,
+                color: rgb(r, g, b),
+              });
+            } else if (ann.type === 'link') {
+              // Add real interactive PDF Link Annotation
+              try {
+                if (ann.linkType === 'page') {
+                  const targetIdx = parseInt(ann.linkTarget) - 1;
+                  const targetPage = pages[targetIdx];
+                  if (targetPage) {
+                    const linkAnnot = outDoc.context.obj({
+                      Type: 'Annot',
+                      Subtype: 'Link',
+                      Rect: [ann.x, H_pdf - ann.y - ann.height, ann.x + ann.width, H_pdf - ann.y],
+                      Border: [0, 0, 0],
+                      Dest: [targetPage.ref, 'XYZ', null, null, null],
+                    });
+                    const annotRef = outDoc.context.register(linkAnnot);
+                    page.node.addAnnot(annotRef);
+                  }
+                } else {
+                  let target = ann.linkTarget || 'https://google.com';
+                  if (ann.linkType === 'email' && !target.startsWith('mailto:')) target = 'mailto:' + target;
+                  if (ann.linkType === 'phone' && !target.startsWith('tel:')) target = 'tel:' + target;
+                  if (ann.linkType === 'url' && !/^https?:\/\//i.test(target)) target = 'https://' + target;
+
+                  const linkAnnot = outDoc.context.obj({
+                    Type: 'Annot',
+                    Subtype: 'Link',
+                    Rect: [ann.x, H_pdf - ann.y - ann.height, ann.x + ann.width, H_pdf - ann.y],
+                    Border: [0, 0, 0],
+                    A: {
+                      Type: 'Action',
+                      S: 'URI',
+                      URI: PDFString.of(target),
+                    }
+                  });
+                  const annotRef = outDoc.context.register(linkAnnot);
+                  page.node.addAnnot(annotRef);
+                }
+              } catch (linkErr) {
+                console.error('Error compiling PDF link annotation', linkErr);
+              }
+            } else if (ann.type === 'form-field') {
+              // Add interactive form fields using pdf-lib Forms API
+              try {
+                const form = outDoc.getForm();
+                if (ann.fieldType === 'text' || ann.fieldType === 'textarea') {
+                  const textField = form.createTextField(ann.fieldName);
+                  textField.setText(ann.defaultValue || '');
+                  textField.addToPage(page, {
+                    x: ann.x,
+                    y: H_pdf - ann.y - ann.height,
+                    width: ann.width,
+                    height: ann.height,
+                  });
+                  if (ann.readOnly) textField.enableReadOnly();
+                  if (ann.mandatory) textField.enableRequired();
+                  if (ann.maxLength) textField.setMaxLength(ann.maxLength);
+                  if (ann.fieldType === 'textarea') textField.enableMultiline();
+                } else if (ann.fieldType === 'checkbox') {
+                  const checkBox = form.createCheckBox(ann.fieldName);
+                  if (ann.checked) checkBox.check();
+                  else checkBox.uncheck();
+                  checkBox.addToPage(page, {
+                    x: ann.x,
+                    y: H_pdf - ann.y - ann.height,
+                    width: ann.width,
+                    height: ann.height,
+                  });
+                  if (ann.readOnly) checkBox.enableReadOnly();
+                  if (ann.mandatory) checkBox.enableRequired();
+                } else if (ann.fieldType === 'radio') {
+                  let radioGroup;
+                  try {
+                    radioGroup = form.getRadioGroup(ann.groupName);
+                  } catch {
+                    radioGroup = form.createRadioGroup(ann.groupName);
+                  }
+                  const optionName = ann.fieldName || `opt_${ann.id}`;
+                  radioGroup.addOptionToPage(optionName, page, {
+                    x: ann.x,
+                    y: H_pdf - ann.y - ann.height,
+                    width: ann.width,
+                    height: ann.height,
+                  });
+                  if (ann.checked) {
+                    radioGroup.select(optionName);
+                  }
+                  if (ann.readOnly) radioGroup.enableReadOnly();
+                  if (ann.mandatory) radioGroup.enableRequired();
+                } else if (ann.fieldType === 'dropdown') {
+                  const dropdown = form.createDropdown(ann.fieldName);
+                  dropdown.setOptions(ann.optionsList || []);
+                  if (ann.defaultValue) dropdown.select(ann.defaultValue);
+                  dropdown.addToPage(page, {
+                    x: ann.x,
+                    y: H_pdf - ann.y - ann.height,
+                    width: ann.width,
+                    height: ann.height,
+                  });
+                  if (ann.readOnly) dropdown.enableReadOnly();
+                  if (ann.mandatory) dropdown.enableRequired();
+                } else if (ann.fieldType === 'signature') {
+                  // Standard flattened drawn signature
+                  if (ann.signatureData) {
+                    const base64Data = ann.signatureData.split(',')[1];
+                    const imgBytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+                    const isPng = ann.signatureData.includes('image/png');
+                    const embeddedImg = isPng 
+                      ? await outDoc.embedPng(imgBytes)
+                      : await outDoc.embedJpg(imgBytes);
+
+                    page.drawImage(embeddedImg, {
+                      x: ann.x,
+                      y: H_pdf - ann.y - ann.height,
+                      width: ann.width,
+                      height: ann.height,
+                    });
+                  } else {
+                    // Draw clean grey visual box
+                    page.drawRectangle({
+                      x: ann.x,
+                      y: H_pdf - ann.y - ann.height,
+                      width: ann.width,
+                      height: ann.height,
+                      borderColor: rgb(0.8, 0.8, 0.8),
+                      borderWidth: 1,
+                      color: rgb(0.97, 0.97, 0.97),
+                    });
+                  }
+                }
+              } catch (formErr) {
+                console.error('Error compiling form field annotation', formErr);
+              }
             }
           }
         }
@@ -1093,9 +1498,10 @@ function EditorWorkspace() {
                     <PDFPage 
                       key={page.pageNum}
                       pageNum={page.pageNum}
-                      pdfjsDoc={pdfjsDoc}
+                      pdfjsDoc={stablePdfjsDoc}
                       onOCRRequest={triggerOCRModal}
                       onPageRendered={handlePageRendered}
+                      openSignatureModal={() => setSigModalOpen(true)}
                     />
                   ))
                 )}
