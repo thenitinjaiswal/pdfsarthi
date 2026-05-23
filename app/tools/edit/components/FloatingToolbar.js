@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import FindReplacePanel from './FindReplacePanel';
 
 export default function FloatingToolbar({ handleExport, openSignatureModal, triggerImageUpload }) {
   const {
@@ -457,6 +458,10 @@ export default function FloatingToolbar({ handleExport, openSignatureModal, trig
           </button>
         </div>
       </div>
+      {/* ── Find & Replace expandable panel ──────────────────────────────── */}
+      <AnimatePresence>
+        {activeTool === 'find-replace' && <FindReplacePanel />}
+      </AnimatePresence>
     </div>
   );
 }

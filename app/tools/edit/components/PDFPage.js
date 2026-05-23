@@ -4,6 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { useEditor } from '../context/EditorContext';
 import { motion } from 'framer-motion';
 import { Maximize2, Sparkles, Loader } from 'lucide-react';
+import { buildHighlightHtml } from './FindReplacePanel';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FONT UTILITIES
@@ -92,6 +93,23 @@ function EditableSpan({
   };
 
   if (!contentEditable) {
+    // highlightedContent is an HTML string (e.g. from find-replace <mark> tags)
+    if (highlightedContent) {
+      return (
+        <span
+          ref={ref}
+          id={id}
+          contentEditable={false}
+          suppressContentEditableWarning={suppressContentEditableWarning}
+          onFocus={onFocus}
+          onMouseDown={onMouseDown}
+          className={className}
+          style={style}
+          tabIndex={tabIndex}
+          dangerouslySetInnerHTML={{ __html: highlightedContent }}
+        />
+      );
+    }
     return (
       <span
         ref={ref}
@@ -104,7 +122,7 @@ function EditableSpan({
         style={style}
         tabIndex={tabIndex}
       >
-        {highlightedContent || value}
+        {value}
       </span>
     );
   }
@@ -901,9 +919,19 @@ export default function PDFPage({ pageNum, pdfjsDoc, onOCRRequest, onPageRendere
                     positionStyle.left = `${left}px`;
                   }
 
+                  // ── Find & Replace highlight ──────────────────────────
+                  const isFindMode = activeTool === 'find-replace' && !!findQuery?.trim();
+                  const itemText   = item.newText ?? item.str ?? '';
+                  const highlightedHtml = isFindMode
+                    ? buildHighlightHtml(itemText, findQuery, matchCase, isSelected)
+                    : null;
+                  // In find-replace mode, make matching items visible even if not active
+                  const isMatchingItem = isFindMode && highlightedHtml !== null;
+
                   return (
                     <div
                       key={item.id}
+                      id={`text-item-wrapper-${item.id}`}
                       style={positionStyle}
                       className={`pointer-events-auto ${
                         isSelectOrEdit
@@ -930,7 +958,8 @@ export default function PDFPage({ pageNum, pdfjsDoc, onOCRRequest, onPageRendere
                     >
                       <EditableSpan
                         id={`editable-text-span-${item.id}`}
-                        value={item.newText}
+                        value={itemText}
+                        highlightedContent={highlightedHtml}
                         onChange={t => {
                           updateTextItem(pageNum, item.id, { newText: t, edited: t !== item.originalText });
                         }}
@@ -973,10 +1002,9 @@ export default function PDFPage({ pageNum, pdfjsDoc, onOCRRequest, onPageRendere
                           fontStyle:      item.fontStyle  ?? (item.italic    ? 'italic'    : 'normal'),
                           textDecoration: item.underline  ? 'underline' : 'none',
                           // Show real text color only when the item is active (selected or
-                          // already edited). Otherwise keep transparent so the PDF canvas
-                          // shows through undisturbed — showing color for ALL items in
-                          // edit-text mode would double-render text over the canvas.
-                          color:          isActive ? (item.color || '#000000') : 'transparent',
+                          // already edited). In find-replace mode, also show color for matching
+                          // items so the user can see what will be replaced.
+                          color: (isActive || isMatchingItem) ? (item.color || '#000000') : 'transparent',
                           outline:        'none',
                           caretColor:     item.color || '#000000',
                           textAlign:      item.alignment || 'left',

@@ -23,7 +23,7 @@ export function EditorProvider({ children }) {
   const [exporting, setExporting] = useState(false);
   const [pageCount, setPageCount] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
-  const [zoom, setZoom] = useState(1.0); // 1.0 = 100%
+  const [zoom, setZoom] = useState(1.0); // 1.0 =                                                                                                                                                                                                                                                                                                                                                                 
   const [activeTool, setActiveTool] = useState('select'); // 'select', 'edit-text', 'add-text', 'find-replace', 'link', 'form-add', 'form-fill', 'signature', 'whiteout', 'annotate', 'shape', 'image'
   const [formSubMode, setFormSubMode] = useState('add'); // 'add' or 'fill'
   
@@ -259,6 +259,55 @@ export function EditorProvider({ children }) {
   };
 
   // ── Text Items Manipulation ─────────────────────────────────────────────────
+
+  /** Replace all occurrences of findQuery inside a single text item. */
+  const findAndReplaceOne = useCallback((pageNum, itemId) => {
+    if (!findQuery.trim()) return;
+    const page = pagesData.find(p => p.pageNum === pageNum);
+    const item = page?.originalTextItems?.find(t => t.id === itemId);
+    if (!item) return;
+    const currentText = item.newText ?? item.str ?? '';
+    const escaped = findQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(escaped, matchCase ? 'g' : 'gi');
+    const newText = currentText.replace(regex, replaceQuery);
+    if (newText === currentText) return;
+    const updated = pagesData.map(pg => {
+      if (pg.pageNum !== pageNum) return pg;
+      return {
+        ...pg,
+        originalTextItems: pg.originalTextItems.map(it =>
+          it.id === itemId
+            ? { ...it, newText, edited: newText !== it.originalText }
+            : it
+        )
+      };
+    });
+    updatePagesDataWithHistory(updated);
+  }, [pagesData, findQuery, replaceQuery, matchCase, updatePagesDataWithHistory]);
+
+  /** Replace ALL occurrences across every page in a single undo-able action. */
+  const findAndReplaceAll = useCallback(() => {
+    if (!findQuery.trim()) return 0;
+    const escaped = findQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(escaped, matchCase ? 'g' : 'gi');
+    let count = 0;
+    const updated = pagesData.map(page => ({
+      ...page,
+      originalTextItems: (page.originalTextItems || []).map(item => {
+        const currentText = item.newText ?? item.str ?? '';
+        const newText = currentText.replace(regex, replaceQuery);
+        if (newText !== currentText) {
+          count++;
+          return { ...item, newText, edited: newText !== item.originalText };
+        }
+        return item;
+      })
+    }));
+    updatePagesDataWithHistory(updated);
+    toast.success(`Replaced ${count} occurrence${count !== 1 ? 's' : ''}`);
+    return count;
+  }, [pagesData, findQuery, replaceQuery, matchCase, updatePagesDataWithHistory, toast]);
+
   const updateTextItem = (pageNum, textItemId, updates) => {
     const editedValue = updates.hasOwnProperty('edited') ? updates.edited : true;
     const updated = pagesData.map(page => {
@@ -488,6 +537,8 @@ export function EditorProvider({ children }) {
     replaceQuery, setReplaceQuery,
     matchCase, setMatchCase,
     includeLinks, setIncludeLinks,
+    findAndReplaceOne,
+    findAndReplaceAll,
     browserZoomAlert,
     scannedDocWarning, setScannedDocWarning,
     xfaWarning, setXfaWarning,

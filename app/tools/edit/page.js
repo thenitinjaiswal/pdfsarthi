@@ -1518,7 +1518,7 @@ function EditorWorkspace() {
 export default function EditPDFPage() {
   return (
     <EditorProvider>
-      <div className="min-h-screen bg-dark-950 text-dark-50 flex flex-col select-none">
+      <div className="flex-1 min-h-0 flex flex-col bg-dark-950 text-dark-50 select-none">
         <ToolHeader 
           icon={PenLine} 
           title="Interactive PDF Editor"
